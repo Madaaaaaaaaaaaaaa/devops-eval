@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-python-deps
+        with:
+          python-version: "3.12"
+      - name: Flake8
+        run: flake8 app tests --max-line-length=100
+      - name: Yamllint
+        run: yamllint .github docker-compose.yml prometheus
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.11", "3.12"]
+    services:
+      postgres:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://app:app@localhost:5432/app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-python-deps
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Pytest
+        run: >
+          pytest
+          --junitxml=report-${{ matrix.python-version }}.xml
+          --cov=app
+          --cov-report=xml:coverage-${{ matrix.python-version }}.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports-${{ matrix.python-version }}
+          path: |
+            report-${{ matrix.python-version }}.xml
+            coverage-${{ matrix.python-version }}.xml
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reports-*
+          path: reports
+      - name: Liste des rapports
+        run: ls -R reports
+      - name: Build de l'image (sans push)
+        run: docker build -t devops-app:ci .
+
+  ci-ok:
+    needs: [lint, test, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Vérifier que tout est vert
+        run: |
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} build=${{ needs.build.result }}"
+          [ "${{ needs.lint.result }}" = "success" ] && \
+          [ "${{ needs.test.result }}" = "success" ] && \
+          [ "${{ needs.build.result }}" = "success" ]
