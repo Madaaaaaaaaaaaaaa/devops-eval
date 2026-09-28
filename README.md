@@ -1,62 +1,63 @@
 # devops-eval
 
-Pipeline complet : conteneurisation, CI/CD et métriques, pour une API Flask avec base Postgres.
+Une API Flask connectée à Postgres, conteneurisée et déployée automatiquement via GitHub Actions, avec des métriques Prometheus.
 
 ## Architecture
 
-- **app/** : API Flask (`/health`, `/visit`, `/metrics`)
-- **Dockerfile** : build multi-stage, image `python:3.12-slim`, utilisateur non-root, `HEALTHCHECK`
-- **docker-compose.yml** : services `app`, `db` (Postgres), `prometheus`
-- **.github/workflows/ci.yml** : lint, test (matrix Python 3.11/3.12, service Postgres), build, `ci-ok`
-- **.github/workflows/cd.yml** : build + push sur GHCR (tags `latest`, SHA court, semver), déploiement sur runner self-hosted, vérification post-déploiement avec rollback
-- **.github/actions/setup-python-deps/** : action locale réutilisable (setup Python + cache + install)
-- **prometheus/** : scrape config + règles d'alerte
+- `app/` : l'API Flask, avec les endpoints `/health`, `/visit` et `/metrics`
+- `Dockerfile` : build multi-stage sur `python:3.12-slim`, l'application tourne avec un utilisateur non-root et un HEALTHCHECK
+- `docker-compose.yml` : trois services, `app`, `db` pour Postgres et `prometheus`
+- `.github/workflows/ci.yml` : lint, tests sur une matrix Python 3.11 et 3.12 avec un vrai service Postgres, build de l'image, et un job `ci-ok` qui doit être vert
+- `.github/workflows/cd.yml` : construit l'image, la pousse sur GHCR avec trois tags, puis la déploie sur un runner self-hosted, avec vérification post-déploiement et rollback automatique
+- `.github/actions/setup-python-deps/` : une action locale réutilisable qui installe Python, active le cache et installe les dépendances
+- `prometheus/` : la configuration de scrape et les règles d'alerte
 
-## Commandes pour lancer le projet en local
+## Lancer le projet en local
 
-\`\`\`bash
+```bash
 git clone https://github.com/Madaaaaaaaaaaaaaa/devops-eval.git
 cd devops-eval
 docker compose up --build
 curl localhost:8000/health
 curl -X POST localhost:8000/visit
 curl localhost:8000/metrics
-# Prometheus : http://localhost:9090/alerts
-\`\`\`
+```
+Prometheus est accessible sur http://localhost:9090/alerts
 
-## Endpoints
+## Les endpoints
 
-- `GET /health` : vérifie la connexion à la base, renvoie 200 ou 503
-- `POST /visit` : incrémente un compteur de visites en base
-- `GET /metrics` : expose les métriques au format Prometheus
+`GET /health` vérifie que la base répond et renvoie 200 ou 503 selon le résultat.
+`POST /visit` incrémente un compteur de visites stocké en base.
+`GET /metrics` expose les métriques au format Prometheus.
 
 ## Métriques exposées
 
-- `http_requests_total{endpoint, code}` : compteur de requêtes
-- `http_request_duration_seconds` : histogramme de latence par route (permet p95/p99)
-- `app_version_info{version}` : jauge exposant le SHA du commit déployé
+`http_requests_total` compte les requêtes reçues, avec les labels endpoint et code.
+`http_request_duration_seconds` est un histogramme de latence par route, il permet de calculer p95 et p99.
+`app_version_info` est une jauge qui expose le SHA du commit actuellement déployé.
 
-## Règles d'alerte
+## Les règles d'alerte
 
-- **HighErrorRate5xx** : ratio des réponses 5xx sur le total > 5 % pendant 5 minutes. Seuil choisi pour capter une dégradation réelle sans alerter sur un pic isolé ; `for: 5m` filtre les faux positifs ponctuels.
-- **HighLatencyP95** : p95 de latence > 500 ms pendant 10 minutes. Seuil représentant une dégradation perceptible par l'utilisateur ; `for: 10m` car la latence fluctue plus que le taux d'erreur.
+La première, HighErrorRate5xx, se déclenche quand plus de 5% des réponses sont des 5xx pendant 5 minutes. Ce seuil capte une vraie dégradation sans réagir à un pic isolé, et la fenêtre de 5 minutes évite les faux positifs.
 
-## CI
+La seconde, HighLatencyP95, se déclenche quand le p95 de latence dépasse 500 ms pendant 10 minutes. Ce seuil correspond à une lenteur perceptible pour l'utilisateur, et la fenêtre plus longue tient compte du fait que la latence varie davantage que le taux d'erreur.
 
-Quatre jobs obligatoires : `lint` (flake8 + yamllint), `test` (matrix 3.11/3.12, service Postgres réellement utilisé, cache pip, rapports JUnit/coverage publiés), `build` (build de l'image, récupère les rapports), `ci-ok` (vert obligatoire, requis par la protection de branche `main`).
+## La CI
 
-## CD
+Quatre jobs s'enchaînent : lint avec flake8 et yamllint, test sur la matrix Python avec un service Postgres réellement utilisé par les tests, build qui construit l'image, et ci-ok qui doit être vert pour que le merge sur main soit autorisé.
 
-Déclenché sur push vers `main` (après CI verte via `workflow_call`) ou manuellement via `workflow_dispatch` (input `environment: production`). Construit et pousse l'image sur `ghcr.io` avec 3 tags (`latest`, SHA court, semver `1.0.<run_number>`), puis déploie sur le runner self-hosted : vérification post-déploiement avec 3 tentatives sur `/health`, rollback automatique vers le SHA précédent en cas d'échec.
+## La CD
+
+Elle se déclenche sur un push vers main, après que la CI soit passée via workflow_call, ou manuellement via workflow_dispatch avec l'environnement production en entrée. Elle construit et pousse l'image sur ghcr.io avec trois tags: latest, le SHA court du commit et un tag semver. Elle déploie ensuite sur le runner self-hosted, vérifie que l'application répond bien sur /health avec trois tentatives, et déclenche un rollback automatique vers le SHA précédent si le déploiement échoue.
 
 ## Secrets et permissions
 
-Chaque workflow déclare des `permissions` explicites en tête (moindre privilège). Le `GITHUB_TOKEN` intégré est utilisé pour l'authentification sur GHCR, aucun secret personnalisé n'est nécessaire.
+Chaque workflow déclare ses permissions explicitement en tête de fichier, selon le principe du moindre privilège. Le GITHUB_TOKEN fourni par GitHub suffit pour s'authentifier sur GHCR, aucun secret supplémentaire n'est nécessaire.
 
-## Runner self-hosted
+## Le runner self-hosted
 
-Un runner GitHub Actions est installé sur une machine Ubuntu (WSL2), avec Docker Engine, pour exécuter le job `deploy` et déployer réellement l'application.
+Un runner GitHub Actions tourne sur une machine Ubuntu, avec Docker installé, pour exécuter réellement le déploiement.
 
-## Captures
+## Preuve du cache
 
-- Cache HIT sur un second run de la CI : `docs/cache-hit.png`
+![Cache HIT sur un second run de la CI](docs/cache-hit.png)
