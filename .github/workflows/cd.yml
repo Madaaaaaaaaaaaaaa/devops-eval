@@ -1,0 +1,95 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environnement cible
+        type: choice
+        options: [production]
+        default: production
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build-push:
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      sha: ${{ steps.vars.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Variables
+        id: vars
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "semver=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: APP_VERSION=${{ steps.vars.outputs.sha }}
+          tags: |
+            ${{ steps.vars.outputs.image }}:latest
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.sha }}
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.semver }}
+
+  deploy:
+    needs: build-push
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    timeout-minutes: 15
+    environment: ${{ inputs.environment || 'production' }}
+    env:
+      IMAGE: ${{ needs.build-push.outputs.image }}
+      SHA: ${{ needs.build-push.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Deploy
+        run: |
+          export APP_IMAGE="$IMAGE:$SHA" APP_VERSION="$SHA"
+          docker compose pull app
+          docker compose up -d --no-build
+      - name: Vérification post-déploiement (3 retries)
+        run: |
+          for i in 1 2 3; do
+            if curl -fsS http://localhost:8000/health; then
+              echo "OK"
+              echo "$SHA" > "$HOME/.last_good_sha"
+              exit 0
+            fi
+            echo "Tentative $i échouée"
+            sleep 10
+          done
+          exit 1
+      - name: Rollback
+        if: failure()
+        run: |
+          if [ -f "$HOME/.last_good_sha" ]; then
+            PREV=$(cat "$HOME/.last_good_sha")
+            echo "Rollback vers $PREV"
+            export APP_IMAGE="$IMAGE:$PREV" APP_VERSION="$PREV"
+            docker compose pull app
+            docker compose up -d --no-build
+          else
+            echo "Pas de version précédente"
+          fi
