@@ -60,6 +60,3 @@ Un runner GitHub Actions est installé sur une machine Ubuntu (WSL2), avec Docke
 ## Captures
 
 - Cache HIT sur un second run de la CI : `docs/cache-hit.png`
-- `ci-ok` vert bloquant le merge sans CI verte : `docs/ci-ok.png`
-- Déploiement réussi (CD) : `docs/deploy-ok.png`
-- Rollback déclenché après un healthcheck en échec : `docs/rollback.png`
