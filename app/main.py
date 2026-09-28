@@ -40,7 +40,7 @@ def health():
     try:
         with get_conn() as conn:
             conn.execute("SELECT 1")
-        return jsonify(status="ok"), 500
+        return jsonify(status="ok"), 200
     except Exception:
         return jsonify(status="db_down"), 503
 
